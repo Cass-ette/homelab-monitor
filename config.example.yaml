@@ -1,0 +1,16 @@
+ssh_key: ~/.ssh/id_ed25519
+
+servers:
+  server1:
+    host: your-server.com
+    port: 22
+    user: root
+    platform: linux  # linux, windows, darwin
+
+  server2:
+    host: 192.168.1.100
+    port: 22
+    user: administrator
+    platform: windows
+
+  # Add more servers as needed
