@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -26,17 +27,55 @@ type Server struct {
 }
 
 type ServerStatus struct {
-	Name      string    `json:"name"`
-	Online    bool      `json:"online"`
-	CPU       string    `json:"cpu"`
-	Memory    string    `json:"memory"`
-	Disk      string    `json:"disk"`
-	GPU       string    `json:"gpu"`
-	Uptime    string    `json:"uptime"`
-	Tasks     []Task    `json:"tasks"`
-	Ports     []Port    `json:"ports,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Error     string    `json:"error,omitempty"`
+	Name       string      `json:"name"`
+	Online     bool        `json:"online"`
+	CPU        string      `json:"cpu"`
+	Memory     string      `json:"memory"`
+	Disk       string      `json:"disk"`
+	GPU        string      `json:"gpu"`
+	GPUDetail  *GPUDetail  `json:"gpu_detail,omitempty"`
+	DiskDetail *DiskDetail `json:"disk_detail,omitempty"`
+	Uptime     string      `json:"uptime"`
+	Tasks      []Task      `json:"tasks"`
+	Ports      []Port      `json:"ports,omitempty"`
+	UpdatedAt  time.Time   `json:"updated_at"`
+	Error      string      `json:"error,omitempty"`
+}
+
+type DiskDetail struct {
+	Drives    []DriveInfo `json:"drives"`     // 各盘符信息
+	LargeItems []LargeItem `json:"large_items"` // 大文件/目录
+}
+
+type DriveInfo struct {
+	Letter string `json:"letter"` // C:, D:, E: 或 /
+	Total  string `json:"total"`  // 总容量 (GB)
+	Used   string `json:"used"`   // 已用 (GB)
+	Free   string `json:"free"`   // 可用 (GB)
+	Percent string `json:"percent"` // 使用率
+}
+
+type LargeItem struct {
+	Path string `json:"path"` // 文件/目录路径
+	Size string `json:"size"` // 大小 (GB)
+	Type string `json:"type"` // file 或 directory
+}
+
+type GPUDetail struct {
+	Name        string          `json:"name"`         // GPU 名称
+	Utilization string          `json:"utilization"`  // 使用率
+	Temperature string          `json:"temperature"`  // 温度
+	MemoryUsed  string          `json:"memory_used"`  // 已用显存
+	MemoryTotal string          `json:"memory_total"` // 总显存
+	Processes   []TrainingProc  `json:"processes"`    // 训练进程
+}
+
+type TrainingProc struct {
+	PID     string   `json:"pid"`
+	Name    string   `json:"name"`
+	Memory  string   `json:"memory"`  // 显存占用
+	Command string   `json:"command"` // 完整命令
+	LogTail []string `json:"log_tail,omitempty"` // 日志最后几行
 }
 
 type Port struct {
@@ -79,6 +118,7 @@ func main() {
 	r.GET("/api/status", handleStatus)
 	r.POST("/api/report", handleAgentReport)
 	r.GET("/api/ports/:server", handlePorts)
+	r.GET("/api/disk/:server", handleDisk)
 	r.GET("/api/logs/:server/:task", handleLogs)
 	r.POST("/api/task/:server/start", handleTaskStart)
 	r.POST("/api/task/:server/stop", handleTaskStop)
@@ -122,6 +162,11 @@ func updateServerStatus(name string) {
 		status.GPU = runCommand(client, `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits`)
 		status.Uptime = runCommand(client, `powershell -Command "(Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime | Select-Object -ExpandProperty TotalHours | ForEach-Object { [math]::Round($_, 1) }"`)
 
+		// Get detailed GPU info
+		if status.GPU != "" && status.GPU != "N/A" {
+			status.GPUDetail = getGPUDetail(client, server.Platform)
+		}
+
 		// Get running tasks
 		_ = runCommand(client, `powershell -Command "Get-Process python,pythonw -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CPU,WS,StartTime | ConvertTo-Json -Compress"`)
 		// Parse JSON and populate status.Tasks (TODO: implement JSON parsing)
@@ -133,9 +178,57 @@ func updateServerStatus(name string) {
 		status.Disk = runCommand(client, `df -h / | tail -1 | awk '{print $5}' | tr -d '%'`)
 		status.GPU = runCommand(client, `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null || echo "N/A"`)
 		status.Uptime = runCommand(client, `uptime -p | cut -d' ' -f2-`)
+
+		// Get detailed GPU info
+		if status.GPU != "N/A" && status.GPU != "" {
+			status.GPUDetail = getGPUDetail(client, server.Platform)
+		}
 	}
 
 	statusCache[name] = status
+}
+
+func getGPUDetail(client *ssh.Client, platform string) *GPUDetail {
+	detail := &GPUDetail{}
+
+	// Get GPU basic info
+	detail.Name = strings.TrimSpace(runCommand(client, `nvidia-smi --query-gpu=name --format=csv,noheader`))
+	detail.Utilization = strings.TrimSpace(runCommand(client, `nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits`))
+	detail.Temperature = strings.TrimSpace(runCommand(client, `nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader`))
+	detail.MemoryUsed = strings.TrimSpace(runCommand(client, `nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits`))
+	detail.MemoryTotal = strings.TrimSpace(runCommand(client, `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits`))
+
+	// Get GPU processes
+	procsOutput := runCommand(client, `nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits`)
+	lines := strings.Split(procsOutput, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) >= 3 {
+			proc := TrainingProc{
+				PID:    strings.TrimSpace(parts[0]),
+				Name:   strings.TrimSpace(parts[1]),
+				Memory: strings.TrimSpace(parts[2]) + " MiB",
+			}
+
+			// Get command line for this process
+			if platform == "windows" {
+				cmdQuery := fmt.Sprintf(`powershell -Command "Get-Process -Id %s -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path"`, proc.PID)
+				proc.Command = strings.TrimSpace(runCommand(client, cmdQuery))
+			} else {
+				cmdQuery := fmt.Sprintf(`ps -p %s -o args --no-headers`, proc.PID)
+				proc.Command = strings.TrimSpace(runCommand(client, cmdQuery))
+			}
+
+			detail.Processes = append(detail.Processes, proc)
+		}
+	}
+
+	return detail
 }
 
 func connectSSH(server Server) (*ssh.Client, error) {
@@ -227,6 +320,117 @@ func handlePorts(c *gin.Context) {
 	output := runCommand(client, cmd)
 	ports := parsePorts(output, server.Platform)
 	c.JSON(http.StatusOK, gin.H{"ports": ports})
+}
+
+func handleDisk(c *gin.Context) {
+	serverName := c.Param("server")
+	server, ok := config.Servers[serverName]
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
+		return
+	}
+
+	client, err := connectSSH(server)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer client.Close()
+
+	detail := getDiskDetail(client, server.Platform)
+	c.JSON(http.StatusOK, gin.H{"disk": detail})
+}
+
+func getDiskDetail(client *ssh.Client, platform string) *DiskDetail {
+	detail := &DiskDetail{}
+
+	if platform == "windows" {
+		// Get drives using wmic (simpler and more reliable)
+		drivesCmd := `wmic logicaldisk where drivetype=3 get caption,size,freespace /format:csv`
+		drivesOutput := runCommand(client, drivesCmd)
+
+		if drivesOutput != "error" && drivesOutput != "" {
+			lines := strings.Split(drivesOutput, "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.Contains(line, "Caption") {
+					continue
+				}
+				parts := strings.Split(line, ",")
+				if len(parts) >= 4 {
+					caption := strings.TrimSpace(parts[1])
+					freeStr := strings.TrimSpace(parts[2])
+					sizeStr := strings.TrimSpace(parts[3])
+
+					if caption != "" && sizeStr != "" {
+						size, _ := strconv.ParseFloat(sizeStr, 64)
+						free, _ := strconv.ParseFloat(freeStr, 64)
+						if size > 0 {
+							used := size - free
+							totalGB := size / 1024 / 1024 / 1024
+							usedGB := used / 1024 / 1024 / 1024
+							freeGB := free / 1024 / 1024 / 1024
+							percent := (used / size) * 100
+
+							detail.Drives = append(detail.Drives, DriveInfo{
+								Letter:  caption,
+								Total:   fmt.Sprintf("%.1f GB", totalGB),
+								Used:    fmt.Sprintf("%.1f GB", usedGB),
+								Free:    fmt.Sprintf("%.1f GB", freeGB),
+								Percent: fmt.Sprintf("%.1f", percent),
+							})
+						}
+					}
+				}
+			}
+		}
+
+		// Skip large items for now (too slow)
+		// We can add it back later with optimization
+
+	} else {
+		// Linux
+		dfCmd := `df -h | grep -E '^/dev/' | awk '{print $1"|"$2"|"$3"|"$4"|"$5}'`
+		dfOutput := runCommand(client, dfCmd)
+		lines := strings.Split(dfOutput, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parts := strings.Split(line, "|")
+			if len(parts) >= 5 {
+				detail.Drives = append(detail.Drives, DriveInfo{
+					Letter:  parts[0],
+					Total:   parts[1],
+					Used:    parts[2],
+					Free:    parts[3],
+					Percent: strings.TrimSuffix(parts[4], "%"),
+				})
+			}
+		}
+
+		// Get large directories
+		largeCmd := `du -h --max-depth=1 / 2>/dev/null | sort -rh | head -10 | awk '{print $2"|"$1"|directory"}'`
+		largeOutput := runCommand(client, largeCmd)
+		lines = strings.Split(largeOutput, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parts := strings.Split(line, "|")
+			if len(parts) >= 3 {
+				detail.LargeItems = append(detail.LargeItems, LargeItem{
+					Path: parts[0],
+					Size: parts[1],
+					Type: parts[2],
+				})
+			}
+		}
+	}
+
+	return detail
 }
 
 func parsePorts(output string, platform string) []Port {

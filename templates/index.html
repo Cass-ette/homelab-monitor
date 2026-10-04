@@ -153,6 +153,8 @@
                                 ${renderMetric('GPU', s.gpu, s.gpu === 'N/A' ? '' : '%')}
                             </div>
 
+                            ${s.gpu_detail ? renderGPUSummary(s.gpu_detail) : ''}
+
                             <div class="pt-3 border-t border-binance-border">
                                 <div class="flex justify-between text-xs text-gray-400 mb-1">
                                     <span>Uptime</span>
@@ -160,9 +162,19 @@
                                 <div class="text-sm">${s.uptime}</div>
                             </div>
 
-                            <button onclick="viewPorts('${s.name}')" class="w-full py-2 bg-binance-yellow hover:bg-yellow-500 text-black font-medium rounded transition text-sm">
-                                View Ports
-                            </button>
+                            <div class="grid ${s.gpu_detail ? 'grid-cols-3' : 'grid-cols-2'} gap-2">
+                                ${s.gpu_detail ? `
+                                    <button onclick='viewGPU(${JSON.stringify(s.name)})' class="py-2 bg-binance-hover hover:bg-binance-border border border-binance-border hover:border-binance-yellow text-binance-text font-medium rounded transition text-sm">
+                                        GPU Details
+                                    </button>
+                                ` : ''}
+                                <button onclick="viewDisk('${s.name}')" class="py-2 bg-binance-hover hover:bg-binance-border border border-binance-border hover:border-blue-500 text-binance-text font-medium rounded transition text-sm">
+                                    Disk Details
+                                </button>
+                                <button onclick="viewPorts('${s.name}')" class="py-2 bg-binance-yellow hover:bg-yellow-500 text-black font-medium rounded transition text-sm">
+                                    View Ports
+                                </button>
+                            </div>
                         </div>
                     ` : `
                         <div class="p-8 text-center">
@@ -198,6 +210,50 @@
                 <div>
                     <div class="text-xs text-gray-500 mb-1">${label}</div>
                     <div class="text-lg font-semibold ${colorClass}">${value}${unit}</div>
+                </div>
+            `;
+        }
+
+        function renderGPUSummary(gpu) {
+            if (!gpu || !gpu.name) return '';
+
+            const util = parseFloat(gpu.utilization) || 0;
+            const temp = parseFloat(gpu.temperature) || 0;
+            const memUsed = parseFloat(gpu.memory_used) || 0;
+            const memTotal = parseFloat(gpu.memory_total) || 1;
+            const memPercent = ((memUsed / memTotal) * 100).toFixed(0);
+
+            let utilColor = 'status-online';
+            if (util >= 80) utilColor = 'status-offline';
+            else if (util >= 50) utilColor = 'text-binance-yellow';
+
+            let tempColor = 'status-online';
+            if (temp >= 80) tempColor = 'status-offline';
+            else if (temp >= 70) tempColor = 'text-binance-yellow';
+
+            return `
+                <div class="pt-3 border-t border-binance-border">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs text-gray-500">GPU</span>
+                        ${gpu.processes && gpu.processes.length > 0 ?
+                            `<span class="text-xs px-2 py-0.5 bg-green-500/20 text-green-400 rounded">${gpu.processes.length} Running</span>` :
+                            `<span class="text-xs text-gray-600">Idle</span>`
+                        }
+                    </div>
+                    <div class="grid grid-cols-3 gap-2 text-xs">
+                        <div>
+                            <div class="text-gray-600">Util</div>
+                            <div class="font-semibold ${utilColor}">${gpu.utilization}%</div>
+                        </div>
+                        <div>
+                            <div class="text-gray-600">Temp</div>
+                            <div class="font-semibold ${tempColor}">${gpu.temperature}°C</div>
+                        </div>
+                        <div>
+                            <div class="text-gray-600">VRAM</div>
+                            <div class="font-semibold">${memPercent}%</div>
+                        </div>
+                    </div>
                 </div>
             `;
         }
@@ -277,6 +333,179 @@
 
         function closePortModal() {
             document.getElementById('port-modal').classList.add('hidden');
+        }
+
+        function viewGPU(serverName) {
+            const server = statusData.find(s => s.name === serverName);
+            if (!server || !server.gpu_detail) {
+                return;
+            }
+
+            const gpu = server.gpu_detail;
+            const memUsed = parseFloat(gpu.memory_used) || 0;
+            const memTotal = parseFloat(gpu.memory_total) || 1;
+            const memPercent = ((memUsed / memTotal) * 100).toFixed(1);
+
+            document.getElementById('port-modal-title').textContent = `${serverName} - GPU Monitor`;
+
+            let html = `
+                <div class="space-y-4">
+                    <!-- GPU Info -->
+                    <div class="bg-binance-bg border border-binance-border rounded-lg p-4">
+                        <h3 class="font-semibold mb-3">${gpu.name}</h3>
+                        <div class="grid grid-cols-4 gap-4">
+                            <div>
+                                <div class="text-xs text-gray-500 mb-1">Utilization</div>
+                                <div class="text-2xl font-bold status-online">${gpu.utilization}%</div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-gray-500 mb-1">Temperature</div>
+                                <div class="text-2xl font-bold ${parseFloat(gpu.temperature) >= 80 ? 'status-offline' : 'text-binance-yellow'}">${gpu.temperature}°C</div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-gray-500 mb-1">VRAM Used</div>
+                                <div class="text-2xl font-bold">${memUsed.toFixed(0)} MiB</div>
+                                <div class="text-xs text-gray-500">${memPercent}% of ${memTotal.toFixed(0)} MiB</div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-gray-500 mb-1">Processes</div>
+                                <div class="text-2xl font-bold ${gpu.processes && gpu.processes.length > 0 ? 'status-online' : 'text-gray-600'}">${gpu.processes ? gpu.processes.length : 0}</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- VRAM Bar -->
+                    <div class="bg-binance-bg border border-binance-border rounded-lg p-4">
+                        <div class="text-sm text-gray-400 mb-2">VRAM Usage</div>
+                        <div class="w-full bg-binance-card rounded-full h-4 overflow-hidden">
+                            <div class="bg-gradient-to-r from-binance-yellow to-yellow-500 h-full transition-all" style="width: ${memPercent}%"></div>
+                        </div>
+                        <div class="flex justify-between text-xs text-gray-500 mt-1">
+                            <span>${memUsed.toFixed(0)} MiB</span>
+                            <span>${memTotal.toFixed(0)} MiB</span>
+                        </div>
+                    </div>
+
+                    <!-- Running Processes -->
+                    ${gpu.processes && gpu.processes.length > 0 ? `
+                        <div>
+                            <div class="flex items-center space-x-2 mb-3 pb-2 border-b border-binance-border">
+                                <span class="text-sm font-semibold status-online">Running Processes</span>
+                                <span class="text-xs text-gray-500">${gpu.processes.length} active</span>
+                            </div>
+                            <div class="space-y-2">
+                                ${gpu.processes.map(proc => `
+                                    <div class="bg-binance-bg border border-binance-border hover:border-green-500/50 transition rounded-lg p-3">
+                                        <div class="flex items-center justify-between mb-2">
+                                            <div class="font-semibold text-sm">${proc.name}</div>
+                                            <div class="text-xs px-2 py-1 bg-binance-card rounded">PID ${proc.pid}</div>
+                                        </div>
+                                        <div class="text-xs text-gray-500 mb-1">VRAM: <span class="text-binance-yellow">${proc.memory}</span></div>
+                                        ${proc.command ? `<div class="text-xs text-gray-600 font-mono truncate">${proc.command}</div>` : ''}
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    ` : `
+                        <div class="text-center py-8 text-gray-500">
+                            <svg class="w-12 h-12 mx-auto mb-2 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                            <div class="text-sm">GPU is idle - No processes running</div>
+                        </div>
+                    `}
+                </div>
+            `;
+
+            document.getElementById('port-modal-content').innerHTML = html;
+            document.getElementById('port-modal').classList.remove('hidden');
+        }
+
+        async function viewDisk(serverName) {
+            document.getElementById('port-modal').classList.remove('hidden');
+            document.getElementById('port-modal-title').textContent = `${serverName} - Disk Space`;
+            document.getElementById('port-modal-content').innerHTML = '<div class="text-center text-gray-400 py-8">Loading disk info...</div>';
+
+            try {
+                const res = await fetch(`/api/disk/${serverName}`);
+                const data = await res.json();
+
+                if (data.disk) {
+                    const disk = data.disk;
+                    let html = '<div class="space-y-4">';
+
+                    // Drives
+                    if (disk.drives && disk.drives.length > 0) {
+                        html += `
+                            <div>
+                                <div class="flex items-center space-x-2 mb-3 pb-2 border-b border-binance-border">
+                                    <span class="text-sm font-semibold">Drives</span>
+                                    <span class="text-xs text-gray-500">${disk.drives.length} total</span>
+                                </div>
+                                <div class="space-y-3">
+                                    ${disk.drives.map(drive => {
+                                        const percent = parseFloat(drive.percent) || 0;
+                                        let colorClass = 'from-green-500 to-emerald-500';
+                                        if (percent >= 90) colorClass = 'from-red-500 to-red-600';
+                                        else if (percent >= 80) colorClass = 'from-yellow-500 to-yellow-600';
+                                        else if (percent >= 60) colorClass = 'from-blue-500 to-blue-600';
+
+                                        return `
+                                            <div class="bg-binance-bg border border-binance-border rounded-lg p-4">
+                                                <div class="flex items-center justify-between mb-2">
+                                                    <div class="font-semibold">${drive.letter}</div>
+                                                    <div class="text-sm text-gray-500">${drive.used} / ${drive.total}</div>
+                                                </div>
+                                                <div class="w-full bg-binance-card rounded-full h-3 overflow-hidden mb-1">
+                                                    <div class="bg-gradient-to-r ${colorClass} h-full transition-all" style="width: ${percent}%"></div>
+                                                </div>
+                                                <div class="flex justify-between text-xs text-gray-500">
+                                                    <span>${percent}% used</span>
+                                                    <span>${drive.free} free</span>
+                                                </div>
+                                            </div>
+                                        `;
+                                    }).join('')}
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // Large items
+                    if (disk.large_items && disk.large_items.length > 0) {
+                        html += `
+                            <div>
+                                <div class="flex items-center space-x-2 mb-3 pb-2 border-b border-binance-border">
+                                    <span class="text-sm font-semibold">Largest Directories</span>
+                                    <span class="text-xs text-gray-500">Top ${disk.large_items.length}</span>
+                                </div>
+                                <div class="space-y-2">
+                                    ${disk.large_items.map((item, idx) => `
+                                        <div class="bg-binance-bg border border-binance-border hover:border-binance-yellow/50 transition rounded-lg p-3">
+                                            <div class="flex items-center justify-between">
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="text-xs text-gray-500 mb-1">#${idx + 1}</div>
+                                                    <div class="text-sm truncate font-mono">${item.path}</div>
+                                                </div>
+                                                <div class="text-right ml-4">
+                                                    <div class="font-semibold text-binance-yellow">${item.size}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    html += '</div>';
+                    document.getElementById('port-modal-content').innerHTML = html;
+                } else {
+                    document.getElementById('port-modal-content').innerHTML = '<div class="text-center text-gray-400 py-8">No disk info available</div>';
+                }
+            } catch (err) {
+                document.getElementById('port-modal-content').innerHTML = `<div class="text-center text-red-400 py-8">Error: ${err.message}</div>`;
+            }
         }
 
         // Initial load and auto-refresh
